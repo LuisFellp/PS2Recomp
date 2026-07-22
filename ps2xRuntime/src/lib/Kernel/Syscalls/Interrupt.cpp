@@ -132,6 +132,16 @@ namespace ps2_syscalls
                       { return a.order < b.order; });
         }
 
+        if (cause == kIntcVblankStart)
+        {
+            static std::atomic<uint32_t> s_vblankDispatchLogs{0};
+            const uint32_t n = s_vblankDispatchLogs.fetch_add(1, std::memory_order_relaxed);
+            if (n < 4000u)
+            {
+                RUNTIME_LOG("[INTC:vblankDispatch] n=" << n << " handlerCount=" << handlers.size() << std::endl);
+            }
+        }
+
         for (const IrqHandlerInfo &info : handlers)
         {
             if (!runtime->hasFunction(info.handler))
@@ -159,6 +169,7 @@ namespace ps2_syscalls
             try
             {
                 R5900Context irqCtx{};
+                irqCtx.cop0_status |= 0x00000001u; // match main/thread contexts' IE fix
                 SET_GPR_U32(&irqCtx, 28, info.gp);
                 SET_GPR_U32(&irqCtx, 29, getAsyncHandlerStackTop(runtime));
                 SET_GPR_U32(&irqCtx, 31, 0u);
@@ -168,6 +179,7 @@ namespace ps2_syscalls
                 SET_GPR_U32(&irqCtx, 7, 0u);
                 irqCtx.pc = info.handler;
 
+                uint32_t stepCount = 0u;
                 while (irqCtx.pc != 0u && runtime && !runtime->isStopRequested())
                 {
                     PS2Runtime::RecompiledFunction step = runtime->lookupFunction(irqCtx.pc);
@@ -178,6 +190,19 @@ namespace ps2_syscalls
                     // Interrupt handlers must be able to preempt a guest thread that is
                     // spinning on interrupt-produced state, such as a vblank counter.
                     step(rdram, &irqCtx, runtime);
+                    ++stepCount;
+                }
+
+                if (cause == kIntcVblankStart)
+                {
+                    static std::atomic<uint32_t> s_vblankDoneLogs{0};
+                    const uint32_t n2 = s_vblankDoneLogs.fetch_add(1, std::memory_order_relaxed);
+                    if (n2 < 4000u)
+                    {
+                        RUNTIME_LOG("[INTC:vblankHandlerDone] n=" << n2 << " steps=" << stepCount
+                                                                  << " finalPc=0x" << std::hex << irqCtx.pc << std::dec
+                                                                  << std::endl);
+                    }
                 }
             }
             catch (const ThreadExitException &)
